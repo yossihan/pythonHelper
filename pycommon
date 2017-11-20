@@ -1,0 +1,402 @@
+import os
+import shlex
+import socket
+import time
+import sys
+import zipfile
+import datetime
+import platform
+import tarfile
+import fileinput
+import logging
+import xml.etree.cElementTree as ET
+import argparse
+import shutil
+import io
+import modconfig
+import subprocess
+
+max_loops = 2
+
+try:
+	from configparser import ConfigParser
+except ImportError:
+	from ConfigParser import ConfigParser  # ver. < 3.0
+
+if sys.version_info[0] == 3:
+	from urllib.request import urlopen,Request
+	from urllib.error import URLError,HTTPError
+else:
+    # Not Python 3 - today, it is most likely to be Python 2
+    # But note that this might need an update when Python 4
+    # might be around one day
+    from urllib2 import urlopen , HTTPError, URLError ,Request
+
+def read_config_params( config_file ):
+
+	config = io.StringIO()
+	config.write(u'[dummysection]\n')
+	if sys.version_info[0] == 2:
+		config.write(unicode(open(config_file).read()))
+	else:
+		config.write(open(config_file).read())
+	config.seek(0, os.SEEK_SET)
+	
+	cp = ConfigParser()
+	cp.readfp(config)
+	options = cp.options('dummysection')
+	dict = {}
+	for option in options:
+		dict[option] = cp.get('dummysection', option)
+	
+	print (dict)
+	return dict
+	
+	
+def collect_install_params(installed_version_dir, installed_params_dir, output_dir):
+		
+	if not os.path.exists(output_dir):
+		os.makedirs(output_dir)
+	
+	f = open(installed_version_dir +'/installed-versions.txt','r')
+	lines = f.read().split('\n')	
+	f.close()
+	INSTALL_TYPE =""
+	for line in lines:
+		if ( line.startswith('DRNFT') and len(INSTALL_TYPE) == 0):
+			s = line.split()
+			PLATFORM, PACKAGE_DATE, INSTALL_DATE, VERSION = s[1] + "_" + platform.release(), s[2], s[3], s[4]
+			INSTALL_TYPE = " ".join(s[6:])
+		if line.startswith('PANFT'):
+			s = line.split()
+			PLATFORM, PACKAGE_DATE, INSTALL_DATE, VERSION = s[1], s[2], s[3], s[4]
+	# instantiate
+	config = ConfigParser()
+
+	# parse Installation_Parameters.txt
+	config.read(installed_params_dir+ '/Installation_Parameters.txt') #'Installation_Parameters.txt'
+
+	# read values from a section
+	DB_TYPE = config.get('DATABASE PARAMETERS', 'Database server Type')
+
+	print (PLATFORM, VERSION, PACKAGE_DATE, INSTALL_DATE, INSTALL_TYPE, DB_TYPE)
+
+	root = ET.Element("root")
+	install_params = ET.SubElement(root, "install_params")
+
+	ET.SubElement(install_params, "PLATFORM").text = PLATFORM
+	ET.SubElement(install_params, "PACKAGE_DATE").text = PACKAGE_DATE
+	ET.SubElement(install_params, "INSTALL_DATE").text = INSTALL_DATE
+	ET.SubElement(install_params, "INSTALL_TYPE").text = INSTALL_TYPE
+	ET.SubElement(install_params, "DB_TYPE").text = DB_TYPE
+	ET.SubElement(install_params, "VERSION").text = VERSION		
+
+	tree = ET.ElementTree(root)		
+	tree.write(output_dir +"/install_params.xml")
+		
+	#return PLATFORM + PACKAGE_DATE + INSTALL_DATE + INSTALL_TYPE + VERSION
+	return {'PLATFORM':PLATFORM, 'PACKAGE_DATE':PACKAGE_DATE ,'INSTALL_DATE':INSTALL_DATE, 'INSTALL_TYPE':INSTALL_TYPE,'VERSION':VERSION }
+
+
+def replace_host( replace_file ):
+	
+	print( "replacing WIN-2012 host parameter on: ", replace_file)
+	myhost = socket.gethostname()
+	try:
+		for line in fileinput.input(replace_file, inplace = 1): 
+			print (line.replace("WIN-2012", myhost).rstrip('\r\n'))		
+		
+	except os.error as e:
+		logging.basicConfig(filename='replaceHost.log',level=logging.DEBUG)
+		logging.debug(e.errno)
+		logging.debug(e.filename)
+		logging.debug(e.strerror)
+
+		
+def read_file(file_path):
+	print ("reading file : " ,file_path)
+	try:
+		f = open(file_path,"r")
+		uid = f.read()
+		f.close()
+		return uid		
+			
+	except os.error as e:
+		logging.basicConfig(filename='uid_check.log',level=logging.DEBUG)
+		logging.debug(e.errno)
+		logging.debug(e.filename)
+		logging.debug(e.strerror)
+		
+		
+def unzip( fname, directory_to_extract_to ):
+	print( "unzip: ", fname, "to: ", directory_to_extract_to )
+	
+	if (fname.endswith("tar.gz") or fname.endswith("TAR.gz")):
+		tar = tarfile.open(fname, "r:gz")
+		tar.extractall(directory_to_extract_to)
+		tar.close()
+	elif (fname.endswith("zip")):
+		zip_ref = zipfile.ZipFile(fname, 'r')
+		zip_ref.extractall(directory_to_extract_to)
+		zip_ref.close()
+		
+	
+def zipdir(path, zipfile):
+    # zipfile is zipfile handle
+	for root, dirs, files in os.walk(path):
+		for file in files:
+			if os.path.getsize(os.path.join(root, file))!= 0:
+				zipfile.write(os.path.join(root, file))
+	
+
+	
+def adjust_installed_versions(installed_versions_file):
+	print("adjust_installed_versions")
+	ws = ' ' # 1 whitespace	
+	alreadyHasNewLine = 0
+	modified = False
+	
+	with open(installed_versions_file, "r+") as f:
+		lines = f.read().split('\n')		
+		line918 = ""
+		for line in lines:
+			print(line)
+			if (line918 == "") and (line.startswith("PANFT.9.0.00.400") or line.startswith("PANFT.9.0.00.500")):
+				s = line.split()			
+				PIM, PLATFORM, PACKAGE_DATE, INSTALL_DATE, VERSION, INSTALL_TYPE, COMMENTS = s[0], s[1], s[2], s[3], s[4], s[5], s[6]
+				PIM = "DRNFT.9.0.18"
+				VERSION = "9.0.18.000"
+				INSTALL_TYPE = "INSTALLATION"
+				COMMENTS = "Control-M/Enterprise Manager 918 - manual installation"
+				line918 = PIM + ws*13 + PLATFORM + ws*8 + PACKAGE_DATE + ws*4 + INSTALL_DATE + ws*4 + VERSION + ws*5 + INSTALL_TYPE + ws*3 + COMMENTS		
+				print(line918)
+			elif line.startswith("DRNFT.9.0.18"):
+				line918 = ""
+			elif not line:	#empty line
+				alreadyHasNewLine = 1
+				print("identified new line")
+		
+		if (line918 != ""):
+			if (alreadyHasNewLine != 1):
+				f.write("\n")
+			f.write(line918)
+			modified = True
+						
+		f.closed
+		return modified
+		
+		
+def start_config_agent():
+	print("start_config_agent")
+	unixCommand = "start_config_agent"
+	windowsCommand = "cmd.exe /c sc start \"Control-MEM Configuration Agent\""
+
+	loop = max_loops
+	while loop > 0:
+		if (platform.system() == 'Windows'):
+			command = windowsCommand
+		else:
+			command = unixCommand		
+		
+		print(command)
+		x = os.system(command)
+	
+		print (x)
+		if ((platform.system() == 'Windows') and (x == 1056)):
+			print("An instance of the service is already running")			
+			return
+			
+		if (x != 0):
+			print("Failed to start Config_Agent! Sleep 120 seconds before trying again...")
+			time.sleep(120)
+			loop -= 1
+		else:
+			return
+			
+	print ("Reached maximum value of loops. Exit program...")
+	sys.exit(1)
+	
+		
+def stop_config_agent():
+	print("stop_config_agent but first verify it's running")
+	
+	verify_component("Config_Agent")
+	
+	try:
+		if (platform.system() == 'Windows'):
+			x = subprocess.check_output(["cmd.exe", "/c ctl.exe -mcs -C Config_Agent -all -cmd shutdown"])
+		else:
+			x = subprocess.check_output(["em", "ctl", "-mcs", "-C", "Config_Agent", "-all", "-cmd", "shutdown"])
+		
+		print (x)
+		if (b"Shutdown command has been issued to Config_Agent" not in x):
+			print("Failed to shutdown Config_Agent!")
+			sys.exit(1)
+		
+		if (verify_component_down("Config_Agent") == False):
+			print("Failed to shutdown Config_Agent!")
+			sys.exit(1)
+		
+	except subprocess.CalledProcessError as e:
+		print("error>",e.output,'<')
+		print("return code>",e.returncode,'<')
+		sys.exit(1)			
+				
+def verify_component(comp):
+	print("verify_component " + comp)
+	
+	loop = max_loops
+	while loop > 0:
+		try:		
+			if (platform.system() == 'Windows'):
+				x = subprocess.check_output(["cmd.exe", "/c ctl.exe -mcs -C " + comp + " -all -cmd life_check"])
+			else:
+				x = subprocess.check_output(["em", "ctl", "-mcs", "-C", comp, "-all", "-cmd", "life_check"])
+				
+			print (x)
+			if (b"Message returned: \"OK\"" not in x):
+				print(comp + " failed in life check! Sleep 120 seconds before trying again...")
+				time.sleep(120)
+			else:
+				return
+			
+		except subprocess.CalledProcessError as e:
+			print("error>",e.output,'<')
+			print("return code>",e.returncode,'<')
+			time.sleep(120)		
+
+	print ("Reached maximum value of loops. Exit program...")
+	sys.exit(1)
+	
+def verify_component_down(comp):
+	print("verify_component_down " + comp)
+
+	loop = max_loops
+	while loop > 0:
+		try:
+			if (platform.system() == 'Windows'):
+				x = subprocess.check_output(["cmd.exe", "/c ctl.exe -mcs -C " + comp + " -all -cmd life_check"])
+			else:
+				x = subprocess.check_output(["em", "ctl", "-mcs", "-C", comp, "-all", "-cmd", "life_check"])
+
+			if (b"Message returned: \"OK\"" not in x):
+				return True
+				
+			print(comp + " is still alive! Sleep 120 seconds before trying again...")
+			time.sleep(120)
+		
+		except subprocess.CalledProcessError as e:
+			print("error>",e.output,'<')
+			print("return code>",e.returncode,'<')
+			if (e.returncode == 61):
+				print(comp + " is down!")
+				return True
+			return False
+
+	return False
+	
+def recycle_components():
+	print("recycle_components")
+	
+	stop_config_agent()
+	print("Sleep 180 seconds after stopping Config Agent...")
+	time.sleep(180)
+	
+	start_config_agent()
+	print("Sleep 180 seconds after starting Config Agent...")
+	time.sleep(180)
+	
+	verify_component("Config_Agent")
+	verify_component("CMS")
+	verify_component("GUI_Server")
+	
+def deploy_thrift(emHome):
+	print("deploy_thrift")
+	
+	src = emHome + "/etc/site/emThriftAPI.war"
+	if (platform.system() == 'Windows'):		
+		dst = emHome + "/emweb/tomcat/webapps/emThriftAPI.war"
+	else:		
+		dst = emHome + "/etc/emweb/tomcat/webapps/emThriftAPI.war"
+	
+	shutil.copy2(src, dst)
+	
+	if os.path.isfile (dst): 
+		print("copied emThriftAPI.war successfully into " + dst)
+	else:
+		print("failed to copy emThriftAPI.war into " + dst)			
+		sys.exit(1)	
+		
+def start_thrift():
+	print("start_thrift")
+	unixCommand = "em ctl -mcs -C GUI_Server -all -cmdstr \"THRIFT start\""
+	windowsCommand = "cmd.exe /c ctl.exe -mcs -C GUI_Server -all -cmdstr \"THRIFT start\""
+		
+	if (platform.system() == 'Windows'):
+		command = windowsCommand		
+	else:
+		command = unixCommand
+		
+	print(command)
+	x = os.system(command)		
+	print (x)
+	if (x != 0):
+		print("Failed to start THRIFT in GSR!")	
+		sys.exit(1)	
+	
+	
+def verify_thrift():
+	print("verify_thrift")
+	
+	try:
+		if (platform.system() == 'Windows'):
+			x = subprocess.check_output(["cmd.exe", "/c ctl.exe -mcs -C GUI_Server -all -cmdstr THRIFT"])
+		else:
+			x = subprocess.check_output(["em", "ctl", "-mcs", "-C", "GUI_Server", "-all", "-cmdstr", "THRIFT"])
+		
+		print (x)
+		if (b"Listen port: 0" in x):
+			print(comp + " failed to activate THRIFT in GSR!")
+			sys.exit(1)
+		
+	except subprocess.CalledProcessError as e:
+		print("error>",e.output,'<')
+		print("return code>",e.returncode,'<')
+		sys.exit(1)	
+	
+#python 3
+def checkThriftServicesState(url,servicesList = []):
+	timeout = time.time() + 60 * 5   # 3 minutes from now
+	condition = True
+	_url = url
+	print(_url)
+	_servicesList = servicesList
+	for srv in _servicesList:
+		print(srv)
+
+	while condition:
+		# loop body here
+		try:
+			#request = Request('http://localhost:18080/emThriftAPI/nsd')
+			request = Request(_url)			
+			#TODO - if remote ,use public aws ip 
+			response = urlopen(request)
+			the_page = response.read()
+			print (the_page)
+			htmlString = the_page.decode()
+			print (htmlString)
+			#thriftService = htmlString.find("ViewpointRepository")
+			#condition = htmlString.find("ViewpointRepository")
+			condition = False if (htmlString.find(_servicesList[0]) != -1) else True
+			print( "Checking if thrift services up and ready ,keep on waiting for thrift = ", condition)
+			
+		except HTTPError as e:
+			print('The server couldn\'t fulfill the request.')
+			print('Error code: ', e.code)
+		except URLError as e:
+			print('We failed to reach a server.')
+			print('Reason: ', e.reason)
+		time.sleep(5)
+		if time.time() > timeout:
+			print('Failed to reach thrift server or thrift services, exiting')
+			break			
